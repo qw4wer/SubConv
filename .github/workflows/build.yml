@@ -13,6 +13,7 @@ on:
       - 'api.py'
       - 'requirements.txt'
   workflow_call:
+  workflow_dispatch:
     
 
 jobs:

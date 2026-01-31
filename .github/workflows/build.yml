@@ -17,13 +17,15 @@ on:
 
 jobs:
   build:
-    if: github.repository == 'SubConv/SubConv'
+    if: ${{ contains(github.ref, 'SubConv') }}
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
         arch: [x64]
         include:
           - os: macos-latest
+            arch: arm64
+          - os: ubuntu-latest
             arch: arm64
 
     runs-on: ${{ matrix.os }}

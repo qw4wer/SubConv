@@ -17,7 +17,6 @@ jobs:
   build:
     strategy:
       matrix:
-        # 基础矩阵：仅保留核心OS+架构，通过include补全其他架构，避免冗余
         os: [windows-latest, ubuntu-latest, macos-latest]
         arch: [x64]
         include:
@@ -25,10 +24,8 @@ jobs:
             arch: arm64
           - os: ubuntu-latest
             arch: arm64
-      # 关键：一个架构编译失败，不终止其他架构（避免单节点失败导致全流程挂掉）
-      fail-fast: false
+      fail-fast: false # 单个架构失败不影响其他
     runs-on: ${{ matrix.os }}
-    # 为不同OS/架构设置唯一标识，方便后续产物区分（适配Docker）
     outputs:
       artifact-name: subconv-${{ matrix.os }}-${{ matrix.arch }}
 
@@ -36,8 +33,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # 拉取完整仓库，避免Nuitka编译时缺失文件
           fetch-depth: 1
+
+      # 关键：将matrix变量转为环境变量，供shell字段/步骤内使用
+      - name: Set Matrix Env Vars
+        run: |
+          echo "OS_NAME=${{ matrix.os }}" >> $GITHUB_ENV
+          echo "ARCH_NAME=${{ matrix.arch }}" >> $GITHUB_ENV
+        shell: bash # 统一用bash设置环境变量，跨系统兼容
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -45,73 +48,75 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: requirements.txt
-          # 关键：强制为目标架构安装对应Python（比如ubuntu arm64装aarch64的Python）
-          architecture: ${{ matrix.arch }}
+          architecture: ${{ matrix.arch }} # 这里matrix可用，因为是jobs层面的配置
 
-      # 分系统安装Nuitka编译依赖（原流程缺失，会导致Linux/macOS编译失败）
+      # Ubuntu 编译依赖
       - name: Install build dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
+        if: env.OS_NAME == 'ubuntu-latest'
         run: |
           sudo apt update && sudo apt install -y --no-install-recommends \
           gcc g++ make binutils python3-dev libffi-dev \
           && sudo rm -rf /var/lib/apt/lists/*
 
+      # macOS 编译依赖
       - name: Install build dependencies (macOS)
-        if: matrix.os == 'macos-latest'
+        if: env.OS_NAME == 'macos-latest'
         run: |
           brew install gcc make binutils || true
+        shell: bash
 
+      # Windows 编译依赖
       - name: Install build dependencies (Windows)
-        if: matrix.os == 'windows-latest'
+        if: env.OS_NAME == 'windows-latest'
         run: |
           choco install -y gcc make || true
           echo "C:\Program Files\Git\usr\bin" >> $GITHUB_PATH
+        shell: cmd
 
-      # 安装Python依赖（含Nuitka，后续直接用pip装，比Action更稳定）
+      # 安装Python依赖
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
-          # 直接安装Nuitka主版本，比用Nuitka-Action更适配跨架构编译，避免Action兼容问题
           pip install --upgrade nuitka
 
-      # 核心：替换Nuitka-Action为原生命令，精准控制编译参数，适配跨架构
-      - name: Build Executable with Nuitka
+      # 核心修复：用环境变量替代matrix，解决shell字段不识别matrix的问题
+      - name: Build Executable with Nuitka (Windows)
+        if: env.OS_NAME == 'windows-latest'
         run: |
-          # 分系统设置输出文件名和Nuitka参数，统一产物命名
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            # Windows：输出api.exe，单文件，禁用控制台（可选）
-            python -m nuitka --onefile --output-filename=api.exe --output-dir=build api.py
-          else
-            # Linux/macOS：输出api，单文件，静态链接核心库（保证Docker内运行兼容）
-            python -m nuitka --onefile --output-filename=api --output-dir=build \
-            --static-libpython=no --standalone api.py
-          fi
-        # Windows用cmd执行，其他用bash，避免语法错误
-        shell: ${{ matrix.os == 'windows-latest' && 'cmd' || 'bash' }}
+          python -m nuitka --onefile --output-filename=api.exe --output-dir=build api.py
+        shell: cmd
 
-      # 修复文件拷贝：解决原流程macOS/Linux arm64拷贝失败、目录缺失问题
+      - name: Build Executable with Nuitka (Linux/macOS)
+        if: env.OS_NAME != 'windows-latest'
+        run: |
+          python -m nuitka --onefile --output-filename=api --output-dir=build \
+          --static-libpython=no --standalone api.py
+        shell: bash
+
+      # Linux/macOS 拷贝文件
       - name: Copy Files to Output (Linux/macOS)
-        if: matrix.os != 'windows-latest'
+        if: env.OS_NAME != 'windows-latest'
         run: |
           mkdir -p output
-          # 确保build目录下的产物存在，避免拷贝报错
-          cp -f build/api output/ || echo "Warning: api binary not found, check build log"
-          # 递归拷贝static，保留目录结构（原流程无-p，会丢失子目录）
+          cp -f build/api output/ || { echo "Error: api binary not found!"; exit 1; }
           cp -rp static output/
+        shell: bash
 
+      # Windows 拷贝文件
       - name: Copy Files to Output (Windows)
-        if: matrix.os == 'windows-latest'
+        if: env.OS_NAME == 'windows-latest'
         run: |
           md output 2>nul
           copy /Y build\api.exe output\
           xcopy /E /I /Y static output\static\
+        shell: cmd
 
-      # 上传产物：增加retention-days，避免产物堆积；指定if-no-files-found=error，及时发现编译失败
+      # 上传产物
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: subconv-${{ matrix.os }}-${{ matrix.arch }}
+          name: subconv-${{ matrix.os }}-${{ matrix.arch }} # jobs层面matrix可用
           path: output/
-          retention-days: 7  # 产物保留7天，可按需修改
-          if-no-files-found: error  # 无产物时直接报错，不跳过
+          retention-days: 7
+          if-no-files-found: error

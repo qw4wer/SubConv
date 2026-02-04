@@ -17,19 +17,17 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        arch: [x64]
-        include:
-          - os: macos-latest
-            arch: arm64
-          - os: ubuntu-latest
-            arch: arm64
+        # 直接定义所有 系统-架构 组合，避免语法错误
+        os_arch:
+          - windows-latest-x64
+          - ubuntu-latest-x64
+          - ubuntu-latest-arm64
+          - macos-latest-x64
+          - macos-latest-arm64
       fail-fast: false # 单个架构失败不影响其他
-    runs-on:
-      os: ${{ matrix.os }}
-      arch: ${{ matrix.arch }} # 修复：对象格式指定OS和架构，解决语法报错
+    runs-on: ${{ matrix.os_arch }} # 关键：正确的 runs-on 格式
     outputs:
-      artifact-name: subconv-${{ matrix.os }}-${{ matrix.arch }}
+      artifact-name: subconv-${{ matrix.os_arch }}
 
     steps:
       - name: Checkout code
@@ -37,12 +35,16 @@ jobs:
         with:
           fetch-depth: 1
 
-      # 关键：将matrix变量转为环境变量，供shell字段/步骤内使用
-      - name: Set Matrix Env Vars
+      # 解析 系统 和 架构（从 os_arch 字符串中提取）
+      - name: Parse OS and Architecture
         run: |
-          echo "OS_NAME=${{ matrix.os }}" >> $GITHUB_ENV
-          echo "ARCH_NAME=${{ matrix.arch }}" >> $GITHUB_ENV
-        shell: bash # 统一用bash设置环境变量，跨系统兼容
+          # 分割 os_arch 为 OS_NAME 和 ARCH_NAME
+          OS_ARCH="${{ matrix.os_arch }}"
+          OS_NAME="${OS_ARCH%-*}" # 取 '-' 前面的部分（如 ubuntu-latest）
+          ARCH_NAME="${OS_ARCH##*-}" # 取 '-' 后面的部分（如 x64/arm64）
+          echo "OS_NAME=$OS_NAME" >> $GITHUB_ENV
+          echo "ARCH_NAME=$ARCH_NAME" >> $GITHUB_ENV
+        shell: bash
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -51,17 +53,17 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
-      # Ubuntu 编译依赖（区分x64/arm64，安装对应编译器）
+      # Ubuntu 编译依赖（区分 x64/arm64）
       - name: Install build dependencies (Ubuntu)
         if: env.OS_NAME == 'ubuntu-latest'
         run: |
           if [ "$ARCH_NAME" = "arm64" ]; then
-            # arm64架构：安装交叉编译器
+            # arm64：安装交叉编译器
             sudo apt update && sudo apt install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make binutils python3-dev libffi-dev \
             && sudo rm -rf /var/lib/apt/lists/*
           else
-            # x64架构：保持原编译器
+            # x64：默认编译器
             sudo apt update && sudo apt install -y --no-install-recommends \
             gcc g++ make binutils python3-dev libffi-dev \
             && sudo rm -rf /var/lib/apt/lists/*
@@ -83,7 +85,7 @@ jobs:
           echo "C:\Program Files\Git\usr\bin" >> $GITHUB_PATH
         shell: cmd
 
-      # 安装Python依赖
+      # 安装 Python 依赖
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip setuptools wheel
@@ -91,35 +93,35 @@ jobs:
           pip install --upgrade nuitka
         shell: bash
 
-      # Windows 编译（保持原逻辑）
+      # Windows 编译
       - name: Build Executable with Nuitka (Windows)
         if: env.OS_NAME == 'windows-latest'
         run: |
           python -m nuitka --onefile --output-filename=api.exe --output-dir=build api.py
         shell: cmd
 
-      # Linux/macOS 编译（区分Ubuntu arm64，指定交叉编译器）
+      # Linux/macOS 编译（Ubuntu arm64 用交叉编译器）
       - name: Build Executable with Nuitka (Linux/macOS)
         if: env.OS_NAME != 'windows-latest'
         run: |
           if [ "$OS_NAME" = "ubuntu-latest" ] && [ "$ARCH_NAME" = "arm64" ]; then
-            # Ubuntu arm64：使用交叉编译器编译
+            # Ubuntu arm64：指定交叉编译器
             python -m nuitka --onefile --output-filename=api --output-dir=build \
             --static-libpython=no --standalone \
             --gcc="aarch64-linux-gnu-gcc" --gxx="aarch64-linux-gnu-g++" \
             api.py
           else
-            # 其他系统/架构：保持原编译命令
+            # 其他系统/架构：默认编译
             python -m nuitka --onefile --output-filename=api --output-dir=build \
             --static-libpython=no --standalone api.py
           fi
         shell: bash
 
-      # 验证产物架构（可选，便于调试）
+      # 验证产物架构（可选，调试用）
       - name: Verify Binary Architecture (Linux/macOS)
         if: env.OS_NAME != 'windows-latest'
         run: |
-          file output/api || file build/api
+          file build/api
         shell: bash
 
       # Linux/macOS 拷贝文件
@@ -144,7 +146,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: subconv-${{ matrix.os }}-${{ matrix.arch }}
+          name: subconv-${{ matrix.os_arch }}
           path: output/
           retention-days: 7
           if-no-files-found: error

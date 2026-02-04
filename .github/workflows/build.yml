@@ -25,7 +25,9 @@ jobs:
           - os: ubuntu-latest
             arch: arm64
       fail-fast: false # 单个架构失败不影响其他
-    runs-on: ${{ matrix.os }}
+    runs-on: 
+      - ${{ matrix.os }}
+      - arch: ${{ matrix.arch }} # 关键：指定runner架构，适配arm64
     outputs:
       artifact-name: subconv-${{ matrix.os }}-${{ matrix.arch }}
 
@@ -48,15 +50,23 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
           cache-dependency-path: requirements.txt
-          
 
-      # Ubuntu 编译依赖
+      # Ubuntu 编译依赖（区分x64/arm64，安装对应编译器）
       - name: Install build dependencies (Ubuntu)
         if: env.OS_NAME == 'ubuntu-latest'
         run: |
-          sudo apt update && sudo apt install -y --no-install-recommends \
-          gcc g++ make binutils python3-dev libffi-dev \
-          && sudo rm -rf /var/lib/apt/lists/*
+          if [ "$ARCH_NAME" = "arm64" ]; then
+            # arm64架构：安装交叉编译器
+            sudo apt update && sudo apt install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make binutils python3-dev libffi-dev \
+            && sudo rm -rf /var/lib/apt/lists/*
+          else
+            # x64架构：保持原编译器
+            sudo apt update && sudo apt install -y --no-install-recommends \
+            gcc g++ make binutils python3-dev libffi-dev \
+            && sudo rm -rf /var/lib/apt/lists/*
+          fi
+        shell: bash
 
       # macOS 编译依赖
       - name: Install build dependencies (macOS)
@@ -79,19 +89,37 @@ jobs:
           pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
           pip install --upgrade nuitka
+        shell: bash
 
-      # 核心修复：用环境变量替代matrix，解决shell字段不识别matrix的问题
+      # Windows 编译（保持原逻辑）
       - name: Build Executable with Nuitka (Windows)
         if: env.OS_NAME == 'windows-latest'
         run: |
           python -m nuitka --onefile --output-filename=api.exe --output-dir=build api.py
         shell: cmd
 
+      # Linux/macOS 编译（区分Ubuntu arm64，指定交叉编译器）
       - name: Build Executable with Nuitka (Linux/macOS)
         if: env.OS_NAME != 'windows-latest'
         run: |
-          python -m nuitka --onefile --output-filename=api --output-dir=build \
-          --static-libpython=no --standalone api.py
+          if [ "$OS_NAME" = "ubuntu-latest" ] && [ "$ARCH_NAME" = "arm64" ]; then
+            # Ubuntu arm64：使用交叉编译器编译
+            python -m nuitka --onefile --output-filename=api --output-dir=build \
+            --static-libpython=no --standalone \
+            --gcc="aarch64-linux-gnu-gcc" --gxx="aarch64-linux-gnu-g++" \
+            api.py
+          else
+            # 其他系统/架构：保持原编译命令
+            python -m nuitka --onefile --output-filename=api --output-dir=build \
+            --static-libpython=no --standalone api.py
+          fi
+        shell: bash
+
+      # 验证产物架构（可选，便于调试）
+      - name: Verify Binary Architecture (Linux/macOS)
+        if: env.OS_NAME != 'windows-latest'
+        run: |
+          file output/api || file build/api
         shell: bash
 
       # Linux/macOS 拷贝文件
@@ -116,7 +144,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: subconv-${{ matrix.os }}-${{ matrix.arch }} # jobs层面matrix可用
+          name: subconv-${{ matrix.os }}-${{ matrix.arch }}
           path: output/
           retention-days: 7
           if-no-files-found: error

@@ -25,9 +25,9 @@ jobs:
           - os: ubuntu-latest
             arch: arm64
       fail-fast: false # 单个架构失败不影响其他
-    runs-on: 
-      - ${{ matrix.os }}
-      - arch: ${{ matrix.arch }} # 关键：指定runner架构，适配arm64
+    runs-on:
+      os: ${{ matrix.os }}
+      arch: ${{ matrix.arch }} # 修复：对象格式指定OS和架构，解决语法报错
     outputs:
       artifact-name: subconv-${{ matrix.os }}-${{ matrix.arch }}
 

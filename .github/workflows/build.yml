@@ -17,17 +17,22 @@ jobs:
   build:
     strategy:
       matrix:
-        # 直接定义所有 系统-架构 组合，避免语法错误
-        os_arch:
-          - windows-latest-x64
-          - ubuntu-latest-x64
-          - ubuntu-latest-arm64
-          - macos-latest-x64
-          - macos-latest-arm64
-      fail-fast: false # 单个架构失败不影响其他
-    runs-on: ${{ matrix.os_arch }} # 关键：正确的 runs-on 格式
+        # 明确列出要跑的 系统-架构 组合，避免生成不存在的 runs-on 标签
+        include:
+          - os: windows-latest
+            arch: x64
+          - os: ubuntu-latest
+            arch: x64
+          - os: ubuntu-latest
+            arch: arm64
+          - os: macos-latest
+            arch: x64
+          - os: macos-latest
+            arch: arm64
+      fail-fast: false
+    runs-on: ${{ matrix.os }}   # 使用标准的托管 runner 标签
     outputs:
-      artifact-name: subconv-${{ matrix.os_arch }}
+      artifact-name: subconv-${{ matrix.os }}-${{ matrix.arch }}
 
     steps:
       - name: Checkout code
@@ -35,15 +40,10 @@ jobs:
         with:
           fetch-depth: 1
 
-      # 解析 系统 和 架构（从 os_arch 字符串中提取）
-      - name: Parse OS and Architecture
+      - name: Set OS_NAME and ARCH_NAME
         run: |
-          # 分割 os_arch 为 OS_NAME 和 ARCH_NAME
-          OS_ARCH="${{ matrix.os_arch }}"
-          OS_NAME="${OS_ARCH%-*}" # 取 '-' 前面的部分（如 ubuntu-latest）
-          ARCH_NAME="${OS_ARCH##*-}" # 取 '-' 后面的部分（如 x64/arm64）
-          echo "OS_NAME=$OS_NAME" >> $GITHUB_ENV
-          echo "ARCH_NAME=$ARCH_NAME" >> $GITHUB_ENV
+          echo "OS_NAME=${{ matrix.os }}" >> $GITHUB_ENV
+          echo "ARCH_NAME=${{ matrix.arch }}" >> $GITHUB_ENV
         shell: bash
 
       - name: Setup Python 3.11

@@ -17,7 +17,6 @@ jobs:
   build:
     strategy:
       matrix:
-        # 明确列出要跑的 系统-架构 组合，避免生成不存在的 runs-on 标签
         include:
           - os: windows-latest
             arch: x64
@@ -30,7 +29,7 @@ jobs:
           - os: macos-latest
             arch: arm64
       fail-fast: false
-    runs-on: ${{ matrix.os }}   # 使用标准的托管 runner 标签
+    runs-on: ${{ matrix.os }}
     outputs:
       artifact-name: subconv-${{ matrix.os }}-${{ matrix.arch }}
 
@@ -53,31 +52,20 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
-      # Ubuntu 编译依赖（区分 x64/arm64）
-      - name: Install build dependencies (Ubuntu)
-        if: env.OS_NAME == 'ubuntu-latest'
+      - name: Install build dependencies (Ubuntu x64)
+        if: env.OS_NAME == 'ubuntu-latest' && env.ARCH_NAME == 'x64'
         run: |
-          if [ "$ARCH_NAME" = "arm64" ]; then
-            # arm64：安装交叉编译器
-            sudo apt update && sudo apt install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make binutils python3-dev libffi-dev libpython3.11-dev:arm64 \
-            && sudo rm -rf /var/lib/apt/lists/*
-          else
-            # x64：默认编译器
-            sudo apt update && sudo apt install -y --no-install-recommends \
-            gcc g++ make binutils python3-dev libffi-dev \
-            && sudo rm -rf /var/lib/apt/lists/*
-          fi
+          sudo apt update && sudo apt install -y --no-install-recommends \
+          gcc g++ make binutils python3-dev libffi-dev \
+          && sudo rm -rf /var/lib/apt/lists/*
         shell: bash
 
-      # macOS 编译依赖
       - name: Install build dependencies (macOS)
         if: env.OS_NAME == 'macos-latest'
         run: |
           brew install gcc make binutils || true
         shell: bash
 
-      # Windows 编译依赖
       - name: Install build dependencies (Windows)
         if: env.OS_NAME == 'windows-latest'
         run: |
@@ -85,55 +73,71 @@ jobs:
           echo "C:\Program Files\Git\usr\bin" >> $GITHUB_PATH
         shell: cmd
 
-      # 安装 Python 依赖
+      - name: Set up QEMU
+        if: env.OS_NAME == 'ubuntu-latest' && env.ARCH_NAME == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: env.OS_NAME == 'ubuntu-latest' && env.ARCH_NAME == 'arm64'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build with Docker (Ubuntu arm64)
+        if: env.OS_NAME == 'ubuntu-latest' && env.ARCH_NAME == 'arm64'
+        run: |
+          docker run --rm -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            arm64v8/ubuntu:22.04 \
+            bash -c '
+            apt update && apt install -y --no-install-recommends \
+              python3.11 python3.11-dev python3-pip \
+              gcc g++ make binutils libffi-dev && \
+            python3.11 -m pip install --upgrade pip setuptools wheel && \
+            python3.11 -m pip install -r requirements.txt && \
+            python3.11 -m pip install --upgrade nuitka && \
+            python3.11 -m nuitka --onefile --output-filename=api --output-dir=build \
+              --static-libpython=no --standalone api.py && \
+            mkdir -p output && \
+            cp -f build/api output/ && \
+            cp -rp static output/ && \
+            chown -R $(id -u):$(id -g) output
+            '
+        shell: bash
+
       - name: Install Python dependencies
+        if: env.ARCH_NAME != 'arm64' || env.OS_NAME != 'ubuntu-latest'
         run: |
           pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
           pip install --upgrade nuitka
         shell: bash
 
-      # Windows 编译
       - name: Build Executable with Nuitka (Windows)
         if: env.OS_NAME == 'windows-latest'
         run: |
           python -m nuitka --onefile --output-filename=api.exe --output-dir=build api.py
         shell: cmd
 
-      # Linux/macOS 编译（Ubuntu arm64 用交叉编译器）
       - name: Build Executable with Nuitka (Linux/macOS)
-        if: env.OS_NAME != 'windows-latest'
+        if: (env.OS_NAME == 'ubuntu-latest' && env.ARCH_NAME == 'x64') || env.OS_NAME == 'macos-latest'
         run: |
-          if [ "$OS_NAME" = "ubuntu-latest" ] && [ "$ARCH_NAME" = "arm64" ]; then
-            # Ubuntu arm64：指定交叉编译器
-            export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH
-            CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-            python -m nuitka --onefile --output-filename=api --output-dir=build \
-            --static-libpython=no --standalone api.py
-          else
-            # 其他系统/架构：默认编译
-            python -m nuitka --onefile --output-filename=api --output-dir=build \
-            --static-libpython=no --standalone api.py
-          fi
+          python -m nuitka --onefile --output-filename=api --output-dir=build \
+          --static-libpython=no --standalone api.py
         shell: bash
 
-      # 验证产物架构（可选，调试用）
       - name: Verify Binary Architecture (Linux/macOS)
         if: env.OS_NAME != 'windows-latest'
         run: |
-          file build/api
+          file build/api || file output/api
         shell: bash
 
-      # Linux/macOS 拷贝文件
       - name: Copy Files to Output (Linux/macOS)
-        if: env.OS_NAME != 'windows-latest'
+        if: env.OS_NAME != 'windows-latest' && (env.ARCH_NAME != 'arm64' || env.OS_NAME != 'ubuntu-latest')
         run: |
           mkdir -p output
           cp -f build/api output/ || { echo "Error: api binary not found!"; exit 1; }
           cp -rp static output/
         shell: bash
 
-      # Windows 拷贝文件
       - name: Copy Files to Output (Windows)
         if: env.OS_NAME == 'windows-latest'
         run: |
@@ -142,11 +146,10 @@ jobs:
           xcopy /E /I /Y static output\static\
         shell: cmd
 
-      # 上传产物
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: subconv-${{ matrix.os_arch }}
+          name: subconv-${{ matrix.os }}-${{ matrix.arch }}
           path: output/
           retention-days: 7
           if-no-files-found: error

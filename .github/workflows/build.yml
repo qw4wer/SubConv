@@ -60,7 +60,7 @@ jobs:
           if [ "$ARCH_NAME" = "arm64" ]; then
             # arm64：安装交叉编译器
             sudo apt update && sudo apt install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make binutils python3-dev libffi-dev \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu make binutils python3-dev libffi-dev libpython3.11-dev:arm64 \
             && sudo rm -rf /var/lib/apt/lists/*
           else
             # x64：默认编译器
@@ -106,6 +106,7 @@ jobs:
         run: |
           if [ "$OS_NAME" = "ubuntu-latest" ] && [ "$ARCH_NAME" = "arm64" ]; then
             # Ubuntu arm64：指定交叉编译器
+            export LD_LIBRARY_PATH=/usr/lib/aarch64-linux-gnu:$LD_LIBRARY_PATH
             CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
             python -m nuitka --onefile --output-filename=api --output-dir=build \
             --static-libpython=no --standalone api.py

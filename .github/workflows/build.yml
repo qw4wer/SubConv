@@ -19,17 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 基础矩阵：保留原有系统+架构
         os: [windows-latest, ubuntu-latest, macos-latest]
         arch: [x64]
         include:
-          # 原有 macOS arm64
           - os: macos-latest
             arch: arm64
-          # 新增 Linux ARM 架构
-          - os: ubuntu-latest
-            arch: arm64  # Linux ARM64 (aarch64)
-        
 
     runs-on: ${{ matrix.os }}
 
@@ -37,7 +31,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ARM Linux 交叉编译专用步骤
+      - name: Set up QEMU for ARM
+        if: startsWith(matrix.os, 'ubuntu') && matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build ARM64 Linux Binary with Docker
+        if: startsWith(matrix.os, 'ubuntu') && matrix.arch == 'arm64'
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            python:3.11-slim \
+            bash -c "
+              apt-get update && \
+              apt-get install -y gcc g++ libc6-dev && \
+              pip install -r requirements.txt && \
+              pip install nuitka && \
+              python -m nuitka --onefile --output-dir=build api.py
+            "
+
+      # 非ARM的正常流程
       - name: Setup Python
+        if: matrix.arch != 'arm64' || !startsWith(matrix.os, 'ubuntu')
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -45,42 +63,36 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
-      # 适配 Linux ARM 依赖安装（可选：解决ARM架构下可能的依赖编译问题）
-      - name: Install System Dependencies (Linux ARM)
-        if: startsWith(matrix.os, 'ubuntu') && (matrix.arch == 'arm64' || matrix.arch == 'armv7')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc g++ libc6-dev  # Nuitka 编译需要的基础编译环境
-
       - name: Install Dependencies
+        if: matrix.arch != 'arm64' || !startsWith(matrix.os, 'ubuntu')
         run: |
           pip install -r requirements.txt
 
-      # Nuitka 编译：适配 ARM 架构（Nuitka 已支持跨架构编译，无需额外参数）
       - name: Build Executable
+        if: matrix.arch != 'arm64' || !startsWith(matrix.os, 'ubuntu')
         uses: Nuitka/Nuitka-Action@main
         with:
           nuitka-version: main
           script-name: api.py
           mode: onefile
 
-      # 修复文件拷贝逻辑：统一命名，区分 Linux ARM 架构
       - name: Copy Files
         run: |
-          mkdir output
-          # 适配不同系统/架构的二进制文件名
+          mkdir -p output
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             BIN_NAME="api.exe"
-          else
-            # Linux/Mac：添加架构后缀（如 api-linux-arm64、api-macos-arm64）
-            OS_SUFFIX=$(echo ${{ matrix.os }} | sed 's/-latest//')
+            cp build/api.exe output/${BIN_NAME}
+          elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            OS_SUFFIX="linux"
             BIN_NAME="api-${OS_SUFFIX}-${{ matrix.arch }}"
+            cp build/api.bin output/${BIN_NAME}
+          else
+            OS_SUFFIX="macos"
+            BIN_NAME="api-${OS_SUFFIX}-${{ matrix.arch }}"
+            cp build/api.bin output/${BIN_NAME}
           fi
-          # 拷贝编译后的二进制（Nuitka 输出的二进制名：windows 是 api.exe，Linux/Mac 是 api.bin）
-          cp build/api${{ matrix.os == 'windows-latest' && '.exe' || '.bin' }} output/${BIN_NAME}
           cp -r static output/static
 
-      # 上传产物：命名更清晰（如 subconv-ubuntu-latest-arm64）
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:

@@ -16,7 +16,6 @@ on:
 
 jobs:
   build:
-    if: github.repository == 'SubConv/SubConv'
     strategy:
       matrix:
         # 基础矩阵：保留原有系统+架构

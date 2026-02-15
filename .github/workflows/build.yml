@@ -17,6 +17,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         # 基础矩阵：保留原有系统+架构
         os: [windows-latest, ubuntu-latest, macos-latest]
@@ -28,8 +29,7 @@ jobs:
           # 新增 Linux ARM 架构
           - os: ubuntu-latest
             arch: arm64  # Linux ARM64 (aarch64)
-          - os: ubuntu-latest
-            arch: armv7  # Linux ARM32 (armhf)
+        
 
     runs-on: ${{ matrix.os }}
 

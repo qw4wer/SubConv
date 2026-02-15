@@ -19,27 +19,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        arch: [x64]
         include:
+          # x64 builds
+          - os: windows-latest
+            arch: x64
+            use_docker: false
+          - os: ubuntu-latest
+            arch: x64
+            use_docker: false
+          - os: macos-latest
+            arch: x64
+            use_docker: false
+          # ARM builds
           - os: macos-latest
             arch: arm64
+            use_docker: false
+          - os: ubuntu-latest
+            arch: arm64
+            use_docker: true
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64' && 'ubuntu-latest' || matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ARM Linux 交叉编译专用步骤
+      # ===== ARM Linux Docker 编译 =====
       - name: Set up QEMU for ARM
-        if: startsWith(matrix.os, 'ubuntu') && matrix.arch == 'arm64'
+        if: matrix.use_docker == true
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
       - name: Build ARM64 Linux Binary with Docker
-        if: startsWith(matrix.os, 'ubuntu') && matrix.arch == 'arm64'
+        if: matrix.use_docker == true
         run: |
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
@@ -53,9 +66,9 @@ jobs:
               python -m nuitka --onefile --output-dir=build api.py
             "
 
-      # 非ARM的正常流程
+      # ===== 非Docker 编译（x64和macOS） =====
       - name: Setup Python
-        if: matrix.arch != 'arm64' || !startsWith(matrix.os, 'ubuntu')
+        if: matrix.use_docker == false
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -63,19 +76,26 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
+      - name: Install System Dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu') && matrix.use_docker == false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ libc6-dev
+
       - name: Install Dependencies
-        if: matrix.arch != 'arm64' || !startsWith(matrix.os, 'ubuntu')
+        if: matrix.use_docker == false
         run: |
           pip install -r requirements.txt
 
       - name: Build Executable
-        if: matrix.arch != 'arm64' || !startsWith(matrix.os, 'ubuntu')
+        if: matrix.use_docker == false
         uses: Nuitka/Nuitka-Action@main
         with:
           nuitka-version: main
           script-name: api.py
           mode: onefile
 
+      # ===== 打包输出 =====
       - name: Copy Files
         run: |
           mkdir -p output
@@ -83,12 +103,10 @@ jobs:
             BIN_NAME="api.exe"
             cp build/api.exe output/${BIN_NAME}
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
-            OS_SUFFIX="linux"
-            BIN_NAME="api-${OS_SUFFIX}-${{ matrix.arch }}"
+            BIN_NAME="api-linux-${{ matrix.arch }}"
             cp build/api.bin output/${BIN_NAME}
           else
-            OS_SUFFIX="macos"
-            BIN_NAME="api-${OS_SUFFIX}-${{ matrix.arch }}"
+            BIN_NAME="api-macos-${{ matrix.arch }}"
             cp build/api.bin output/${BIN_NAME}
           fi
           cp -r static output/static

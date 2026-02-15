@@ -57,7 +57,7 @@ jobs:
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
-            python:3.11-slim \
+            python:3.11-bullseye \
             bash -c "
               apt-get update && \
               apt-get install -y gcc g++ libc6-dev patchelf && \
@@ -97,6 +97,7 @@ jobs:
 
       # ===== 打包输出 =====
       - name: Copy Files
+        shell: bash
         run: |
           mkdir -p output
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then

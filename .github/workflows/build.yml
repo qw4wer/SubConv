@@ -60,7 +60,7 @@ jobs:
             python:3.11-slim \
             bash -c "
               apt-get update && \
-              apt-get install -y gcc g++ libc6-dev && \
+              apt-get install -y gcc g++ libc6-dev patchelf && \
               pip install -r requirements.txt && \
               pip install nuitka && \
               python -m nuitka --onefile --output-dir=build api.py

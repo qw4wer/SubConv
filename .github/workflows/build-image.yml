@@ -24,100 +24,57 @@ env:
   NUITKA_CACHE_ARM64: ${{ github.workspace }}/.nuitka-cache-arm64
 
 jobs:
-  setup:
+  # 新增：下载 build.yml 生成的 Artifacts
+  download-build-artifacts:
     runs-on: ubuntu-latest
     outputs:
-      tags: ${{ steps.tag.outputs.TAG_NAME }}
-      architectures: linux/amd64,linux/arm64
-    steps:
-      - id: tag
-        run: |
-          new_tag=""
-          for tag in $(echo "${{ inputs.tags }}" | tr "," "\n"); do
-            if [ -z "$new_tag" ]; then
-              new_tag="${{ env.IMAGE_REPOSITORY }}:$tag"
-            else
-              new_tag="$new_tag,${{ env.IMAGE_REPOSITORY }}:$tag"
-            fi
-          done
-          echo "TAG_NAME=$new_tag" >> $GITHUB_OUTPUT
-
-  # 恢复 Nuitka 缓存（无需 actions: read 权限）
-  restore-nuitka-cache:
-    runs-on: ubuntu-latest
-    outputs:
-      cache-hit-amd64: ${{ steps.cache-amd64.outputs.cache-hit }}
-      cache-hit-arm64: ${{ steps.cache-arm64.outputs.cache-hit }}
+      arm64_artifact_path: ${{ steps.download.outputs.arm64_path }}
+      amd64_artifact_path: ${{ steps.download.outputs.amd64_path }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 恢复 AMD64 缓存（仅用默认权限即可）
-      - name: Restore Nuitka Cache (Linux AMD64)
-        id: cache-amd64
-        uses: actions/cache@v4
+      # 下载 ARM64 产物（对应 build.yml 上传的 artifact 名称）
+      - name: Download ARM64 Build Artifact
+        id: download-arm64
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ env.NUITKA_CACHE_AMD64 }}
-          key: nuitka-linux-x64-py311-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            nuitka-linux-x64-
+          name: subconv-ubuntu-latest-arm64  # 必须和 build.yml 中上传的名称一致
+          path: ./artifacts/arm64
 
-      # 恢复 ARM64 缓存
-      - name: Restore Nuitka Cache (Linux ARM64)
-        id: cache-arm64
-        uses: actions/cache@v4
+      # 下载 AMD64 产物
+      - name: Download AMD64 Build Artifact
+        id: download-amd64
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ env.NUITKA_CACHE_ARM64 }}
-          key: nuitka-linux-arm64-py311-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            nuitka-linux-arm64-
+          name: subconv-ubuntu-latest-x64
+          path: ./artifacts/amd64
 
-      # 验证并创建缓存目录
-      - name: Verify Nuitka Cache
+      - name: Output artifact paths
         run: |
-          echo "AMD64 Cache Hit: ${{ steps.cache-amd64.outputs.cache-hit }}"
-          echo "ARM64 Cache Hit: ${{ steps.cache-arm64.outputs.cache-hit }}"
-          mkdir -p ${{ env.NUITKA_CACHE_AMD64 }} ${{ env.NUITKA_CACHE_ARM64 }}
-          chmod -R 777 ${{ env.NUITKA_CACHE_AMD64 }} ${{ env.NUITKA_CACHE_ARM64 }}
+          echo "arm64_path=${{ github.workspace }}/artifacts/arm64" >> $GITHUB_OUTPUT
+          echo "amd64_path=${{ github.workspace }}/artifacts/amd64" >> $GITHUB_OUTPUT
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: [setup, restore-nuitka-cache]
+    needs: [setup, restore-nuitka-cache, download-build-artifacts]  # 依赖下载产物
     outputs:
       tags: ${{ steps.build.outputs.tags }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        install: true
-        driver-opts: network=host
+    # 复制下载的产物到构建目录（关键：避免重新编译）
+    - name: Copy Prebuilt Binaries
+      run: |
+        mkdir -p ./prebuilt/amd64 ./prebuilt/arm64
+        cp ${{ needs.download-build-artifacts.outputs.amd64_artifact_path }}/api-linux-x64 ./prebuilt/amd64/api.bin
+        cp ${{ needs.download-build-artifacts.outputs.arm64_artifact_path }}/api-linux-arm64 ./prebuilt/arm64/api.bin
+        cp -r static ./prebuilt/  # 复制静态资源
 
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_HUB_USER }}
-        password: ${{ secrets.DOCKER_HUB_TOKEN }}
+    # 其余步骤（Set up Docker Buildx、登录）不变...
 
-    # 注入 AMD64 缓存
-    - name: Inject Nuitka Cache for AMD64
-      uses: reproducible-containers/buildkit-cache-dance@v2.1.4
-      with:
-        cache-source: ${{ env.NUITKA_CACHE_AMD64 }}
-        cache-target: /root/.cache/Nuitka
-        platform: linux/amd64
-
-    # 注入 ARM64 缓存
-    - name: Inject Nuitka Cache for ARM64
-      uses: reproducible-containers/buildkit-cache-dance@v2.1.4
-      with:
-        cache-source: ${{ env.NUITKA_CACHE_ARM64 }}
-        cache-target: /root/.cache/Nuitka
-        platform: linux/arm64
-
-    # 构建并推送镜像
+    # 修改 Build and push Docker image 步骤：使用多阶段构建，按架构复制产物
     - name: Build and push Docker image
       id: build
       uses: docker/build-push-action@v5
@@ -126,8 +83,8 @@ jobs:
         push: true
         tags: ${{ needs.setup.outputs.tags }}
         platforms: ${{ needs.setup.outputs.architectures }}
-        cache-from: type=local,src=/tmp/.buildx-cache
-        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+        cache-from: type=local,src=${{ env.BUILDX_CACHE_DIR }}
+        cache-to: type=local,dest=${{ env.BUILDX_CACHE_DIR }},mode=max
+        # 关键：传递产物路径到 Dockerfile
         build-args: |
-          NUITKA_CACHE_PATH=/root/.cache/Nuitka
-          PYTHON_VERSION=3.11
+          PREBUILT_PATH=./prebuilt

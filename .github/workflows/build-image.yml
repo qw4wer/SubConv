@@ -8,20 +8,18 @@ on:
         type: string
         required: true
         default: 'dev'
-    # 新增：接收前一个 workflow 传递的缓存 key（可选，增强缓存精准性）
     outputs:
       image_tags:
         description: 'Pushed image tags'
         value: ${{ jobs.build-and-push.outputs.tags }}
 
+# 修复：移除多余的 actions: read 权限，只保留必要的权限
 permissions:
   contents: read
   packages: write
-  actions: read  # 新增：允许读取前一个 workflow 的缓存/产物
 
 env:
   IMAGE_REPOSITORY: qw4wer/subconv
-  # 定义不同架构的 Nuitka 缓存路径（和前一个 workflow 保持一致）
   NUITKA_CACHE_AMD64: ${{ github.workspace }}/.nuitka-cache-amd64
   NUITKA_CACHE_ARM64: ${{ github.workspace }}/.nuitka-cache-arm64
 
@@ -30,12 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.tag.outputs.TAG_NAME }}
-      # 新增：输出架构列表，方便后续步骤使用
       architectures: linux/amd64,linux/arm64
     steps:
       - id: tag
         run: |
-          # 优化 tag 拼接逻辑（避免开头多余的逗号）
           new_tag=""
           for tag in $(echo "${{ inputs.tags }}" | tr "," "\n"); do
             if [ -z "$new_tag" ]; then
@@ -46,7 +42,7 @@ jobs:
           done
           echo "TAG_NAME=$new_tag" >> $GITHUB_OUTPUT
 
-  # 新增：恢复前一个 workflow 生成的 Nuitka 缓存
+  # 恢复 Nuitka 缓存（无需 actions: read 权限）
   restore-nuitka-cache:
     runs-on: ubuntu-latest
     outputs:
@@ -56,34 +52,31 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 恢复 AMD64 架构的 Nuitka 缓存
+      # 恢复 AMD64 缓存（仅用默认权限即可）
       - name: Restore Nuitka Cache (Linux AMD64)
         id: cache-amd64
         uses: actions/cache@v4
         with:
           path: ${{ env.NUITKA_CACHE_AMD64 }}
-          # 缓存 key 和前一个 workflow 保持一致（核心：确保能匹配）
           key: nuitka-linux-x64-py311-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             nuitka-linux-x64-
 
-      # 恢复 ARM64 架构的 Nuitka 缓存
+      # 恢复 ARM64 缓存
       - name: Restore Nuitka Cache (Linux ARM64)
         id: cache-arm64
         uses: actions/cache@v4
         with:
           path: ${{ env.NUITKA_CACHE_ARM64 }}
-          # 缓存 key 和前一个 workflow 保持一致
           key: nuitka-linux-arm64-py311-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             nuitka-linux-arm64-
 
-      # 验证缓存是否恢复成功
+      # 验证并创建缓存目录
       - name: Verify Nuitka Cache
         run: |
           echo "AMD64 Cache Hit: ${{ steps.cache-amd64.outputs.cache-hit }}"
           echo "ARM64 Cache Hit: ${{ steps.cache-arm64.outputs.cache-hit }}"
-          # 创建缓存目录（避免缓存未命中时路径不存在）
           mkdir -p ${{ env.NUITKA_CACHE_AMD64 }} ${{ env.NUITKA_CACHE_ARM64 }}
           chmod -R 777 ${{ env.NUITKA_CACHE_AMD64 }} ${{ env.NUITKA_CACHE_ARM64 }}
 
@@ -99,7 +92,6 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
       with:
-        # 启用 Buildx 缓存功能，支持多架构缓存
         install: true
         driver-opts: network=host
 
@@ -109,16 +101,15 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USER }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-    # 关键：将 Nuitka 缓存注入到 Buildx 构建环境（按架构拆分）
-    - name: Inject Nuitka Cache for Multi-Arch Build
+    # 注入 AMD64 缓存
+    - name: Inject Nuitka Cache for AMD64
       uses: reproducible-containers/buildkit-cache-dance@v2.1.4
       with:
-        # 为 AMD64 架构挂载缓存
         cache-source: ${{ env.NUITKA_CACHE_AMD64 }}
         cache-target: /root/.cache/Nuitka
-        # 为 ARM64 架构单独挂载缓存（通过 Buildx 平台筛选）
         platform: linux/amd64
-      # ARM64 架构的缓存注入（单独步骤）
+
+    # 注入 ARM64 缓存
     - name: Inject Nuitka Cache for ARM64
       uses: reproducible-containers/buildkit-cache-dance@v2.1.4
       with:
@@ -126,7 +117,7 @@ jobs:
         cache-target: /root/.cache/Nuitka
         platform: linux/arm64
 
-    # 构建并推送多架构镜像（复用 Nuitka 缓存）
+    # 构建并推送镜像
     - name: Build and push Docker image
       id: build
       uses: docker/build-push-action@v5
@@ -135,21 +126,8 @@ jobs:
         push: true
         tags: ${{ needs.setup.outputs.tags }}
         platforms: ${{ needs.setup.outputs.architectures }}
-        # 启用 Buildx 缓存，加速后续构建
         cache-from: type=local,src=/tmp/.buildx-cache
         cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-        # 关键：传递 Nuitka 缓存路径到 Dockerfile（可选，若 Dockerfile 需用到）
         build-args: |
           NUITKA_CACHE_PATH=/root/.cache/Nuitka
           PYTHON_VERSION=3.11
-
-    # 清理缓存（避免占用空间）
-    - name: Move cache
-      run: |
-        rm -rf /tmp/.buildx-cache
-        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-
-    # 输出推送的镜像标签
-    - name: Output pushed tags
-      run: |
-        echo "tags=${{ needs.setup.outputs.tags }}" >> $GITHUB_OUTPUT

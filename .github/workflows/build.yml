@@ -45,9 +45,8 @@ jobs:
           - os: ubuntu-latest
             arch: arm64
             use_docker: true
-            # Docker 内的 Nuitka 缓存路径 + 宿主挂载路径
             docker_nuitka_cache: '/root/.cache/Nuitka'
-            host_nuitka_cache: '${{ github.workspace }}/.nuitka-cache-arm64'
+            # 这里只保留标识，路径在步骤中硬编码，避免解析异常
             cache_key_suffix: 'linux-arm64'
 
     runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64' && 'ubuntu-latest' || matrix.os }}
@@ -75,7 +74,8 @@ jobs:
         if: matrix.use_docker == true
         uses: actions/cache@v3
         with:
-          path: ${{ matrix.host_nuitka_cache }}
+          # 直接硬编码工作区内的缓存路径，彻底避免变量解析问题
+          path: ${{ github.workspace }}/.nuitka-cache-arm64
           key: ${{ steps.gen_cache_key.outputs.cache_key }}
           restore-keys: ${{ steps.gen_cache_key.outputs.restore_key }}
 
@@ -85,15 +85,20 @@ jobs:
         with:
           platforms: arm64
 
-      - name: Build ARM64 Linux Binary with Docker (带缓存)
+      - name: Build ARM64 Linux Binary with Docker (彻底修复路径+权限)
         if: matrix.use_docker == true
         run: |
-          # 创建宿主缓存目录
-          mkdir -p ${{ matrix.host_nuitka_cache }}
-          # 挂载缓存目录到 Docker 容器，复用 Nuitka 缓存
+          # 直接使用完整的工作区路径创建缓存目录（关键修复）
+          HOST_CACHE_DIR="${{ github.workspace }}/.nuitka-cache-arm64"
+          echo "Creating cache dir: $HOST_CACHE_DIR"
+          mkdir -p "$HOST_CACHE_DIR"
+          # 赋予最大权限，避免Docker内写入问题
+          chmod -R 777 "$HOST_CACHE_DIR"
+          
+          # 挂载缓存目录到 Docker 容器，路径绝对明确
           docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}:/workspace \
-            -v ${{ matrix.host_nuitka_cache }}:${{ matrix.docker_nuitka_cache }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "$HOST_CACHE_DIR:${{ matrix.docker_nuitka_cache }}" \
             -w /workspace \
             python:3.11-bullseye \
             bash -c "
@@ -141,7 +146,7 @@ jobs:
           script-name: api.py
           mode: onefile
 
-      # ===== 打包输出（和原逻辑一致）=====
+      # ===== 打包输出（兼容Docker和原生编译）=====
       - name: Copy Files
         shell: bash
         run: |
@@ -151,13 +156,25 @@ jobs:
             cp build/api.exe output/${BIN_NAME}
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             BIN_NAME="api-linux-${{ matrix.arch }}"
-            # 兼容 Docker 编译的产物路径
-            cp ${GITHUB_WORKSPACE}/build/api.bin output/${BIN_NAME} || cp build/api output/${BIN_NAME}
+            # 兼容 Docker 编译和原生编译的产物路径
+            if [[ -f "build/api.bin" ]]; then
+              cp build/api.bin output/${BIN_NAME}
+            elif [[ -f "build/api" ]]; then
+              cp build/api output/${BIN_NAME}
+            else
+              echo "Error: No binary found in build directory!"
+              exit 1
+            fi
           else
             BIN_NAME="api-macos-${{ matrix.arch }}"
             cp build/api.bin output/${BIN_NAME}
           fi
-          cp -r static output/static
+          # 确保静态目录复制成功
+          if [[ -d "static" ]]; then
+            cp -r static output/static
+          else
+            echo "Warning: static directory not found!"
+          fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4

@@ -13,68 +13,102 @@ on:
         description: 'Pushed image tags'
         value: ${{ jobs.build-and-push.outputs.tags }}
 
-# 修复：移除多余的 actions: read 权限，只保留必要的权限
 permissions:
   contents: read
   packages: write
+  actions: read  # 仅用于下载 Artifacts
 
 env:
   IMAGE_REPOSITORY: qw4wer/subconv
-  NUITKA_CACHE_AMD64: ${{ github.workspace }}/.nuitka-cache-amd64
-  NUITKA_CACHE_ARM64: ${{ github.workspace }}/.nuitka-cache-arm64
+  BUILDX_CACHE_DIR: ${{ github.workspace }}/.buildx-cache  # 仅保留 Buildx 缓存
 
 jobs:
-  # 新增：下载 build.yml 生成的 Artifacts
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.tag.outputs.TAG_NAME }}
+      architectures: linux/amd64,linux/arm64
+    steps:
+      - id: tag
+        run: |
+          new_tag=""
+          for tag in $(echo "${{ inputs.tags }}" | tr "," "\n"); do
+            if [ -z "$new_tag" ]; then
+              new_tag="${{ env.IMAGE_REPOSITORY }}:$tag"
+            else
+              new_tag="$new_tag,${{ env.IMAGE_REPOSITORY }}:$tag"
+            fi
+          done
+          echo "TAG_NAME=$new_tag" >> $GITHUB_OUTPUT
+
+  # 仅保留：下载预编译产物（核心步骤）
   download-build-artifacts:
     runs-on: ubuntu-latest
     outputs:
-      arm64_artifact_path: ${{ steps.download.outputs.arm64_path }}
-      amd64_artifact_path: ${{ steps.download.outputs.amd64_path }}
+      arm64_artifact_path: ${{ github.workspace }}/artifacts/arm64
+      amd64_artifact_path: ${{ github.workspace }}/artifacts/amd64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 下载 ARM64 产物（对应 build.yml 上传的 artifact 名称）
+      # 下载 ARM64 产物（名称必须和 build.yml 中一致）
       - name: Download ARM64 Build Artifact
-        id: download-arm64
         uses: actions/download-artifact@v4
         with:
-          name: subconv-ubuntu-latest-arm64  # 必须和 build.yml 中上传的名称一致
+          name: subconv-ubuntu-latest-arm64
           path: ./artifacts/arm64
 
       # 下载 AMD64 产物
       - name: Download AMD64 Build Artifact
-        id: download-amd64
         uses: actions/download-artifact@v4
         with:
           name: subconv-ubuntu-latest-x64
           path: ./artifacts/amd64
 
-      - name: Output artifact paths
+      # 验证产物是否下载成功
+      - name: Verify Artifacts
         run: |
-          echo "arm64_path=${{ github.workspace }}/artifacts/arm64" >> $GITHUB_OUTPUT
-          echo "amd64_path=${{ github.workspace }}/artifacts/amd64" >> $GITHUB_OUTPUT
+          echo "=== AMD64 Artifacts ==="
+          ls -la ${{ github.workspace }}/artifacts/amd64
+          echo "=== ARM64 Artifacts ==="
+          ls -la ${{ github.workspace }}/artifacts/arm64
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: [setup, restore-nuitka-cache, download-build-artifacts]  # 依赖下载产物
+    needs: [setup, download-build-artifacts]
     outputs:
       tags: ${{ steps.build.outputs.tags }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 复制下载的产物到构建目录（关键：避免重新编译）
+    # 复制预编译产物到构建目录（关键：直接用现成产物）
     - name: Copy Prebuilt Binaries
       run: |
         mkdir -p ./prebuilt/amd64 ./prebuilt/arm64
+        # 复制 AMD64 产物（确保文件名和路径正确）
         cp ${{ needs.download-build-artifacts.outputs.amd64_artifact_path }}/api-linux-x64 ./prebuilt/amd64/api.bin
+        # 复制 ARM64 产物
         cp ${{ needs.download-build-artifacts.outputs.arm64_artifact_path }}/api-linux-arm64 ./prebuilt/arm64/api.bin
-        cp -r static ./prebuilt/  # 复制静态资源
+        # 复制静态资源
+        cp -r static ./prebuilt/ || echo "Warning: static directory not found"
+        # 赋予可执行权限
+        chmod +x ./prebuilt/amd64/api.bin ./prebuilt/arm64/api.bin
 
-    # 其余步骤（Set up Docker Buildx、登录）不变...
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        install: true
+        driver-opts: network=host
 
-    # 修改 Build and push Docker image 步骤：使用多阶段构建，按架构复制产物
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_HUB_USER }}
+        password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+    # 移除所有 Nuitka 缓存注入步骤（没用了）
+    # 仅保留 Buildx 缓存（加速镜像构建，非必需）
     - name: Build and push Docker image
       id: build
       uses: docker/build-push-action@v5
@@ -85,6 +119,9 @@ jobs:
         platforms: ${{ needs.setup.outputs.architectures }}
         cache-from: type=local,src=${{ env.BUILDX_CACHE_DIR }}
         cache-to: type=local,dest=${{ env.BUILDX_CACHE_DIR }},mode=max
-        # 关键：传递产物路径到 Dockerfile
         build-args: |
           PREBUILT_PATH=./prebuilt
+
+    - name: Output pushed tags
+      run: |
+        echo "tags=${{ needs.setup.outputs.tags }}" >> $GITHUB_OUTPUT

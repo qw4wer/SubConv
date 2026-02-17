@@ -13,14 +13,14 @@ on:
         description: 'Pushed image tags'
         value: ${{ jobs.build-and-push.outputs.tags }}
 
+# 彻底移除 actions: read 权限，仅保留必需的基础权限
 permissions:
   contents: read
   packages: write
-  actions: read  # 仅用于下载 Artifacts
 
 env:
   IMAGE_REPOSITORY: qw4wer/subconv
-  BUILDX_CACHE_DIR: ${{ github.workspace }}/.buildx-cache  # 仅保留 Buildx 缓存
+  BUILDX_CACHE_DIR: ${{ github.workspace }}/.buildx-cache
 
 jobs:
   setup:
@@ -41,7 +41,8 @@ jobs:
           done
           echo "TAG_NAME=$new_tag" >> $GITHUB_OUTPUT
 
-  # 仅保留：下载预编译产物（核心步骤）
+  # 替代方案：从 GitHub Releases 下载预编译产物（无需 actions: read 权限）
+  # 前提：build.yml 编译完成后，将产物上传到 GitHub Releases（见下方补充配置）
   download-build-artifacts:
     runs-on: ubuntu-latest
     outputs:
@@ -51,27 +52,35 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 下载 ARM64 产物（名称必须和 build.yml 中一致）
-      - name: Download ARM64 Build Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: subconv-ubuntu-latest-arm64
-          path: ./artifacts/arm64
+      # 创建产物目录
+      - name: Create artifact directories
+        run: |
+          mkdir -p ./artifacts/amd64 ./artifacts/arm64
 
-      # 下载 AMD64 产物
-      - name: Download AMD64 Build Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: subconv-ubuntu-latest-x64
-          path: ./artifacts/amd64
+      # 下载 AMD64 产物（替换为你的 Releases 下载链接）
+      - name: Download AMD64 binary from Releases
+        run: |
+          # 示例：从 Releases 下载 api-linux-x64 文件
+          curl -L \
+            -o ./artifacts/amd64/api-linux-x64 \
+            "https://github.com/qw4wer/SubConv/releases/download/dev/api-linux-x64"
+          chmod +x ./artifacts/amd64/api-linux-x64
+
+      # 下载 ARM64 产物
+      - name: Download ARM64 binary from Releases
+        run: |
+          curl -L \
+            -o ./artifacts/arm64/api-linux-arm64 \
+            "https://github.com/qw4wer/SubConv/releases/download/dev/api-linux-arm64"
+          chmod +x ./artifacts/arm64/api-linux-arm64
 
       # 验证产物是否下载成功
       - name: Verify Artifacts
         run: |
           echo "=== AMD64 Artifacts ==="
-          ls -la ${{ github.workspace }}/artifacts/amd64
+          ls -la ./artifacts/amd64
           echo "=== ARM64 Artifacts ==="
-          ls -la ${{ github.workspace }}/artifacts/arm64
+          ls -la ./artifacts/arm64
 
   build-and-push:
     runs-on: ubuntu-latest
@@ -82,18 +91,24 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # 复制预编译产物到构建目录（关键：直接用现成产物）
+    # 复制预编译产物到构建目录
     - name: Copy Prebuilt Binaries
       run: |
         mkdir -p ./prebuilt/amd64 ./prebuilt/arm64
-        # 复制 AMD64 产物（确保文件名和路径正确）
+        # 复制 AMD64 产物
         cp ${{ needs.download-build-artifacts.outputs.amd64_artifact_path }}/api-linux-x64 ./prebuilt/amd64/api.bin
         # 复制 ARM64 产物
         cp ${{ needs.download-build-artifacts.outputs.arm64_artifact_path }}/api-linux-arm64 ./prebuilt/arm64/api.bin
-        # 复制静态资源
+        # 复制静态资源（如有）
         cp -r static ./prebuilt/ || echo "Warning: static directory not found"
-        # 赋予可执行权限
+        # 确保可执行权限
         chmod +x ./prebuilt/amd64/api.bin ./prebuilt/arm64/api.bin
+
+        # 校验产物架构（关键：避免 exec format error）
+        echo "=== AMD64 binary architecture ==="
+        file ./prebuilt/amd64/api.bin
+        echo "=== ARM64 binary architecture ==="
+        file ./prebuilt/arm64/api.bin
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -107,8 +122,7 @@ jobs:
         username: ${{ secrets.DOCKER_HUB_USER }}
         password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-    # 移除所有 Nuitka 缓存注入步骤（没用了）
-    # 仅保留 Buildx 缓存（加速镜像构建，非必需）
+    # 构建并推送多架构镜像
     - name: Build and push Docker image
       id: build
       uses: docker/build-push-action@v5

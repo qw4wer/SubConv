@@ -24,19 +24,31 @@ jobs:
           - os: windows-latest
             arch: x64
             use_docker: false
+            nuitka_cache_path: '%APPDATA%\Nuitka\cache'
+            cache_key_suffix: 'win-x64'
           - os: ubuntu-latest
             arch: x64
             use_docker: false
+            nuitka_cache_path: '~/.cache/Nuitka'
+            cache_key_suffix: 'linux-x64'
           - os: macos-latest
             arch: x64
             use_docker: false
+            nuitka_cache_path: '~/.cache/Nuitka'
+            cache_key_suffix: 'macos-x64'
           # ARM builds
           - os: macos-latest
             arch: arm64
             use_docker: false
+            nuitka_cache_path: '~/.cache/Nuitka'
+            cache_key_suffix: 'macos-arm64'
           - os: ubuntu-latest
             arch: arm64
             use_docker: true
+            # Docker 内的 Nuitka 缓存路径 + 宿主挂载路径
+            docker_nuitka_cache: '/root/.cache/Nuitka'
+            host_nuitka_cache: '${{ github.workspace }}/.nuitka-cache-arm64'
+            cache_key_suffix: 'linux-arm64'
 
     runs-on: ${{ matrix.os == 'ubuntu-latest' && matrix.arch == 'arm64' && 'ubuntu-latest' || matrix.os }}
 
@@ -44,18 +56,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ===== ARM Linux Docker 编译 =====
+      # ===== 通用：生成缓存键（按系统+架构+依赖哈希）=====
+      - name: Generate Nuitka cache key
+        id: gen_cache_key
+        shell: bash
+        run: |
+          # 生成 requirements.txt 的哈希（依赖变更则缓存失效）
+          DEPS_HASH=$(sha256sum requirements.txt | cut -d' ' -f1)
+          # 缓存键：系统-架构-Python版本-依赖哈希
+          CACHE_KEY="nuitka-${{ matrix.cache_key_suffix }}-py311-${DEPS_HASH}"
+          # 回退键：匹配同架构的最新缓存
+          RESTORE_KEY="nuitka-${{ matrix.cache_key_suffix }}-"
+          echo "cache_key=${CACHE_KEY}" >> $GITHUB_OUTPUT
+          echo "restore_key=${RESTORE_KEY}" >> $GITHUB_OUTPUT
+
+      # ===== 1. Docker 编译（Linux ARM64）的缓存配置 =====
+      - name: Restore Nuitka Cache (Linux ARM64 Docker)
+        if: matrix.use_docker == true
+        uses: actions/cache@v3
+        with:
+          path: ${{ matrix.host_nuitka_cache }}
+          key: ${{ steps.gen_cache_key.outputs.cache_key }}
+          restore-keys: ${{ steps.gen_cache_key.outputs.restore_key }}
+
       - name: Set up QEMU for ARM
         if: matrix.use_docker == true
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - name: Build ARM64 Linux Binary with Docker
+      - name: Build ARM64 Linux Binary with Docker (带缓存)
         if: matrix.use_docker == true
         run: |
+          # 创建宿主缓存目录
+          mkdir -p ${{ matrix.host_nuitka_cache }}
+          # 挂载缓存目录到 Docker 容器，复用 Nuitka 缓存
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/workspace \
+            -v ${{ matrix.host_nuitka_cache }}:${{ matrix.docker_nuitka_cache }} \
             -w /workspace \
             python:3.11-bullseye \
             bash -c "
@@ -66,8 +104,16 @@ jobs:
               python -m nuitka --onefile --output-dir=build api.py
             "
 
-      # ===== 非Docker 编译（x64和macOS） =====
-      - name: Setup Python
+      # ===== 2. 原生编译（非Docker）的缓存配置 =====
+      - name: Restore Nuitka Cache (Native Builds)
+        if: matrix.use_docker == false
+        uses: actions/cache@v3
+        with:
+          path: ${{ matrix.nuitka_cache_path }}
+          key: ${{ steps.gen_cache_key.outputs.cache_key }}
+          restore-keys: ${{ steps.gen_cache_key.outputs.restore_key }}
+
+      - name: Setup Python (Native Builds)
         if: matrix.use_docker == false
         uses: actions/setup-python@v5
         with:
@@ -76,18 +122,18 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements.txt
 
-      - name: Install System Dependencies (Linux)
+      - name: Install System Dependencies (Linux Native)
         if: startsWith(matrix.os, 'ubuntu') && matrix.use_docker == false
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc g++ libc6-dev
 
-      - name: Install Dependencies
+      - name: Install Dependencies (Native Builds)
         if: matrix.use_docker == false
         run: |
           pip install -r requirements.txt
 
-      - name: Build Executable
+      - name: Build Executable (Native Builds)
         if: matrix.use_docker == false
         uses: Nuitka/Nuitka-Action@main
         with:
@@ -95,7 +141,7 @@ jobs:
           script-name: api.py
           mode: onefile
 
-      # ===== 打包输出 =====
+      # ===== 打包输出（和原逻辑一致）=====
       - name: Copy Files
         shell: bash
         run: |
@@ -105,7 +151,8 @@ jobs:
             cp build/api.exe output/${BIN_NAME}
           elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             BIN_NAME="api-linux-${{ matrix.arch }}"
-            cp build/api.bin output/${BIN_NAME}
+            # 兼容 Docker 编译的产物路径
+            cp ${GITHUB_WORKSPACE}/build/api.bin output/${BIN_NAME} || cp build/api output/${BIN_NAME}
           else
             BIN_NAME="api-macos-${{ matrix.arch }}"
             cp build/api.bin output/${BIN_NAME}
